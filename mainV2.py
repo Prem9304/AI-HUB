@@ -17,10 +17,19 @@ import time
 from groq import Groq
 import PyPDF2
 import sys
+import traceback
 import json
 import traceback
 import pandas as pd
 from streamlit_option_menu import option_menu
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_groq import ChatGroq as Groq
+
+
+
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+
 
 # Load environment variables
 load_dotenv()
@@ -42,7 +51,7 @@ st.markdown("""
 
 # Horizontal menu
 selected = option_menu(
-    None, ["CHAT-AI", "PDF-AI", 'IMG-GEN', 'VID-GEN'], 
+    None, ["CHAT-AI", "PDF-AI", 'AI-MCQ', 'IMG-GEN', 'VID-GEN'], 
     icons=['house', 'cloud-upload', "list-task", 'file-earmark-image', 'camera-reels'], 
     menu_icon="cast", default_index=0, orientation="horizontal"
 )
@@ -361,4 +370,123 @@ elif selected == "VID-GEN":
 
         except requests.exceptions.RequestException as e:
             st.error(f"Error: {e}")
+
+elif selected == "AI-MCQ":
+    import os
+    import sys
+    import json
+    import traceback
+    import pandas as pd
+    from dotenv import load_dotenv
+    import PyPDF2
+    import streamlit as st
+
+    sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+    from utils import read_file, get_table_data
+
+    from langchain_groq import ChatGroq as Groq
+    from langchain.prompts import PromptTemplate
+    from langchain.chains import LLMChain
+
+    load_dotenv()
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    client = Groq(api_key=groq_api_key)
+
+    quiz_generation_template = """
+    Text: {text}
+    You are an expert MCQ maker. Given the above text, it is your job to create a quiz of {number} multiple choice questions for {subject} students in {tone} tone.
+    Make sure the questions are not repeated and check all the questions to be conforming the text as well.
+    Make sure to format your response like RESPONSE_JSON below and use it as a guide. Ensure to make {number} MCQs.
+    ### RESPONSE_JSON
+    {response_json}
+    """
+
+    quiz_generation_prompt = PromptTemplate(
+        input_variables=["text", "number", "subject", "tone", "response_json"],
+        template=quiz_generation_template
+    )
+
+    quiz_chain = LLMChain(
+        llm=client,
+        prompt=quiz_generation_prompt,
+        output_key="quiz",
+        verbose=True
+    )
+
+    if "quiz" not in st.session_state:
+        st.session_state.quiz = None
+    if "selected_answers" not in st.session_state:
+        st.session_state.selected_answers = {}
+    if "score" not in st.session_state:
+        st.session_state.score = 0
+
+    def extract_text_from_pdf(file):
+        text = ""
+        try:
+            reader = PyPDF2.PdfReader(file)
+            for page_num in range(len(reader.pages)):
+                page = reader.pages[page_num]
+                text += page.extract_text()
+        except Exception as e:
+            st.error(f"Error reading PDF: {e}")
+        return text
+
+    st.title("MCQ Generator")
+
+    with st.sidebar:
+        st.header("Input Details")
         
+        pdf_file = st.file_uploader("Upload PDF", type=["pdf"])
+        if pdf_file is not None:
+            text = extract_text_from_pdf(pdf_file)
+            st.text_area("Extracted text:", text, height=300)
+
+        number = st.number_input("Number of MCQs to generate:", min_value=1, max_value=20, value=3)
+        subject = st.text_input("Subject of the quiz:")
+        tone = st.selectbox("Tone of the quiz:", ["formal", "informal"])
+        
+        if st.button("Generate Quiz"):
+            response_json = "{\n    \"1\": {\n      \"no\": \"1\",\n      \"mcq\": \"multiple choice question\",\n      \"options\": {\n        \"a\": \"choice here\",\n        \"b\": \"choice here\",\n        \"c\": \"choice here\",\n        \"d\": \"choice here\"\n      },\n      \"correct\": \"correct answer\"\n    }\n}"
+            
+            try:
+                result = quiz_chain.invoke(
+                    {"text": text, "number": number, "subject": subject, "tone": tone, "response_json": response_json}
+                )
+                
+                try:
+                    st.session_state.quiz = json.loads(result["quiz"])
+                except json.JSONDecodeError as e:
+                    st.error(f"Error decoding quiz JSON: {e}")
+                    st.session_state.quiz = None
+                
+                st.session_state.selected_answers = {}
+                st.session_state.score = 0
+
+            except Exception as e:
+                st.error(f"An error occurred: {traceback.format_exc()}")
+
+    if st.session_state.quiz:
+        st.subheader("Generated Quiz")
+        for q in st.session_state.quiz.values():
+            st.write(f"Q{q['no']}: {q['mcq']}")
+            for opt, choice in q['options'].items():
+                st.write(f"  {opt}. {choice}")
+            
+            selected_answer = st.session_state.selected_answers.get(q['no'], None)
+            user_answer = st.radio(f"Your answer for Q{q['no']}:", list(q['options'].keys()), key=q['no'], index=list(q['options'].keys()).index(selected_answer) if selected_answer else None)
+            st.session_state.selected_answers[q['no']] = user_answer
+
+        if st.button("Check Answers"):
+            st.session_state.score = 0
+            for q in st.session_state.quiz.values():
+                user_answer = st.session_state.selected_answers.get(q['no'])
+                if user_answer == q['correct']:
+                    st.write(f"Q{q['no']}: Correct!")
+                    st.session_state.score += 1
+                else:
+                    st.write(f"Q{q['no']}: Incorrect! The correct answer is {q['correct']}.")
+
+        st.title("Quiz Score")
+        st.write(f"Your score: {st.session_state.score} / {len(st.session_state.quiz)}")
+    
